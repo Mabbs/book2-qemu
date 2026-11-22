@@ -86,3 +86,12 @@ config MIPS_BOSTON
 
 config FW_CFG_MIPS
     bool
+
+config BOOK2
+    bool
+    default y
+    depends on MIPS && !TARGET_BIG_ENDIAN
+    select SERIAL_MM
+    select PTIMER
+    select USB_OHCI_SYSBUS
+    select USB_HID

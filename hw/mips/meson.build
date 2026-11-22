@@ -1,4 +1,5 @@
 mips_ss = ss.source_set()
+mips_ss.add(when: 'CONFIG_BOOK2', if_true: files('book2.c'))
 mips_ss.add(files('bootloader.c', 'mips_int.c'))
 common_ss.add(when: 'CONFIG_FW_CFG_MIPS', if_true: files('fw_cfg.c'))
 common_ss.add(when: 'CONFIG_LOONGSON3V', if_true: files('loongson3_bootp.c'))
