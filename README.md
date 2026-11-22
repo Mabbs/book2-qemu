@@ -27,6 +27,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start.ps1 -SystemImage
 
 首次启动会出现固件自带的时间窗口：设置时间后点击“确定”，之后进入桌面。再次启动时 RTC 状态从文件恢复，直接进入桌面。
 
+## 发布包
+
+CI 生成的三个运行包都是自包含的，目标机器不需要安装 MSYS2、Homebrew 或 GTK：
+
+- **Windows**：解压 `book2-qemu-windows-x86_64.zip`，把系统镜像放到 `dist-book2\images\book2.img`，双击 `start.cmd`。
+- **Linux**：解压 `book2-qemu-linux-x86_64.tar.gz`，执行 `./dist-book2/run.sh -M book2,msc0-image=<镜像>`。构建基线为 Ubuntu 22.04（glibc 2.35），更新的发行版可直接运行。
+- **macOS**：解压 `book2-qemu-macos-arm64.tar.gz`，执行 `./dist-book2/run.sh ...`。包为 arm64；未签名，首次运行若被 Gatekeeper 拦截，执行 `xattr -dr com.apple.quarantine dist-book2`。
+
+运行包仍使用宿主机的显示服务（X11/Wayland 或 Quartz）、字体和内核，但不再依赖宿主机安装的 GTK/GLib 库。
+
 ## 操作
 
 - 桌面底部按钮切换到中学界面；中学页面点击“更多功能”进入分类页。

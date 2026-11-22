@@ -9,85 +9,102 @@ on:
 permissions:
   contents: write
 
+env:
+  CONFIGURE_FLAGS: >-
+    --target-list=mipsel-softmmu
+    --disable-werror
+    --disable-docs
+    --disable-tools
+    --disable-guest-agent
+    --disable-spice
+    --disable-virglrenderer
+    --disable-opengl
+    --disable-curl
+    --disable-libssh
+    --disable-gnutls
+    --disable-gcrypt
+    --disable-zstd
+    --disable-seccomp
+    --disable-libusb
+    --disable-usb-redir
+    --disable-smartcard
+    --disable-vte
+    --disable-curses
+    --disable-dbus-display
+    --disable-plugins
+
 jobs:
   linux:
-    name: Build (Linux x86_64)
+    name: Build (Linux x86_64, portable)
+    # Build inside the oldest distribution we support: the bundle still uses
+    # the build host's glibc and ELF interpreter.
     runs-on: ubuntu-latest
+    container: ubuntu:22.04
     steps:
+      # checkout runs before the dependency step, but the bare image has no git.
+      - name: Install git for checkout
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git ca-certificates
       - uses: actions/checkout@v4
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential ninja-build python3 python3-pip \
-            pkg-config libglib2.0-dev libpixman-1-dev zlib1g-dev \
-            libslirp-dev libseccomp-dev libcap-ng-dev libcurl4-openssl-dev \
-            libzstd-dev libgcrypt20-dev libgnutls28-dev \
-            libspice-server-dev libvte-2.91-dev \
-            libgtk-3-dev libsdl2-dev
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ninja-build python3 python3-venv python3-pip pkg-config patchelf \
+            libglib2.0-dev libglib2.0-bin libpixman-1-dev zlib1g-dev \
+            libgtk-3-dev libgdk-pixbuf-2.0-dev libpng-dev libjpeg-dev \
+            libasound2-dev libpulse-dev libxkbcommon-dev \
+            shared-mime-info hicolor-icon-theme adwaita-icon-theme
       - name: Configure
-        run: ./configure --target-list=mipsel-softmmu --disable-werror
+        run: |
+          ./configure $CONFIGURE_FLAGS \
+            --disable-cap-ng --disable-bpf --disable-rdma --disable-xen \
+            --disable-numa --disable-linux-io-uring --disable-fuse --disable-libudev
       - name: Build
         run: ninja -C build qemu-system-mipsel
-      - name: Package
-        run: |
-          set -e
-          mkdir -p dist-book2/bin dist-book2/share
-          cp build/qemu-system-mipsel dist-book2/bin/
-          cp README.md dist-book2/ 2>/dev/null || true
-          # Bundle every non-system shared library the binary needs.
-          mkdir -p dist-book2/lib
-          for lib in $(ldd dist-book2/bin/qemu-system-mipsel | awk '{print $3}' | grep -E '^/' | grep -vE '^/(lib|lib64|usr/lib)/' | sort -u); do
-            cp -L "$lib" dist-book2/lib/ || true
-          done
-          printf '%s\n' '#!/bin/sh' 'HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)' 'export LD_LIBRARY_PATH="$HERE/lib:${LD_LIBRARY_PATH:-}"' 'export GSETTINGS_SCHEMA_DIR="$HERE/share/glib-2.0/schemas"' 'exec "$HERE/bin/qemu-system-mipsel" "$@"' > dist-book2/run.sh
-          chmod +x dist-book2/run.sh
-          tar -czf book2-qemu-linux-x86_64.tar.gz dist-book2
+      - name: Package portable bundle
+        run: ./tools/package-linux.sh build/qemu-system-mipsel dist-book2
+      - name: Archive
+        run: tar -czf book2-qemu-linux-x86_64.tar.gz dist-book2
       - uses: actions/upload-artifact@v4
         with:
           name: book2-qemu-linux-x86_64
           path: book2-qemu-linux-x86_64.tar.gz
+          if-no-files-found: error
 
   macos:
-    name: Build (macOS arm64)
+    name: Build (macOS arm64, portable)
     runs-on: macos-26
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
         run: |
-          brew update
-          brew install ninja pkg-config glib pixman python@3.12 \
-            libslirp libssh curl zstd gnutls libgcrypt jpeg-turbo sdl2 gtk+3
+          brew install ninja pkg-config pixman python@3.12 \
+            glib gtk+3 shared-mime-info adwaita-icon-theme
       - name: Configure
         run: |
           export PATH="$(brew --prefix python@3.12)/bin:$PATH"
-          ./configure --target-list=mipsel-softmmu --disable-werror
+          export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:$(brew --prefix)/share/pkgconfig"
+          ./configure $CONFIGURE_FLAGS
       - name: Build
         run: ninja -C build qemu-system-mipsel
-      - name: Package
-        run: |
-          set -e
-          mkdir -p dist-book2/bin dist-book2/lib
-          cp build/qemu-system-mipsel dist-book2/bin/
-          cp README.md dist-book2/ 2>/dev/null || true
-          # Bundle Homebrew dylibs so the binary runs without brew installed.
-          for lib in $(otool -L dist-book2/bin/qemu-system-mipsel | awk 'NR>1 {print $1}' | grep '^/opt/homebrew/' | sort -u); do
-            cp -L "$lib" dist-book2/lib/ || true
-          done
-          printf '%s\n' '#!/bin/sh' 'HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)' 'export DYLD_LIBRARY_PATH="$HERE/lib:${DYLD_LIBRARY_PATH:-}"' 'exec "$HERE/bin/qemu-system-mipsel" "$@"' > dist-book2/run.sh
-          chmod +x dist-book2/run.sh
-          tar -czf book2-qemu-macos-arm64.tar.gz dist-book2
+      - name: Package portable bundle
+        run: ./tools/package-macos.sh build/qemu-system-mipsel dist-book2
+      - name: Archive
+        run: tar -czf book2-qemu-macos-arm64.tar.gz dist-book2
       - uses: actions/upload-artifact@v4
         with:
           name: book2-qemu-macos-arm64
           path: book2-qemu-macos-arm64.tar.gz
+          if-no-files-found: error
 
   windows:
-    name: Build (Windows x86_64, MSYS2 UCRT64)
+    name: Build (Windows x86_64, UCRT64)
     runs-on: windows-latest
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Install MSYS2 UCRT64 toolchain
@@ -103,42 +120,46 @@ jobs:
             mingw-w64-ucrt-x86_64-glib2
             mingw-w64-ucrt-x86_64-pixman
             mingw-w64-ucrt-x86_64-zlib
-            mingw-w64-ucrt-x86_64-libslirp
-            mingw-w64-ucrt-x86_64-gnutls
-            mingw-w64-ucrt-x86_64-libgcrypt
-            mingw-w64-ucrt-x86_64-curl
-            mingw-w64-ucrt-x86_64-zstd
             mingw-w64-ucrt-x86_64-gtk3
             mingw-w64-ucrt-x86_64-sdl2
+            mingw-w64-ucrt-x86_64-adwaita-icon-theme
+            mingw-w64-ucrt-x86_64-shared-mime-info
+            mingw-w64-ucrt-x86_64-binutils
             diffutils
             git
       - name: Configure and build
         shell: msys2 {0}
         run: |
-          cd "$GITHUB_WORKSPACE"
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
           export PATH=/ucrt64/bin:/usr/bin:$PATH
-          ./configure --target-list=mipsel-softmmu --disable-werror
+          ./configure $CONFIGURE_FLAGS
           ninja -C build qemu-system-mipsel.exe
-      - name: Package
-        shell: bash
+      - name: Package portable bundle
+        shell: msys2 {0}
         run: |
           set -e
-          mkdir -p dist-book2/bin dist-book2/share
-          cp build/qemu-system-mipsel.exe dist-book2/bin/
-          cp README.md start.cmd start.ps1 dist-book2/ || true
-          # Copy all UCRT64 runtime DLLs and GTK data next to the executable.
-          cp /c/msys64/ucrt64/bin/*.dll dist-book2/bin/ || true
-          for d in share/glib-2.0/schemas share/gtk-3.0 share/icons share/mime etc/gtk-3.0 lib/gdk-pixbuf-2.0 lib/gio/modules; do
-            if [ -d "/c/msys64/ucrt64/$d" ]; then
-              mkdir -p "dist-book2/$d"
-              cp -r "/c/msys64/ucrt64/$d/." "dist-book2/$d/"
-            fi
-          done
-          7z a -tzip book2-qemu-windows-x86_64.zip dist-book2
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+          export PATH=/ucrt64/bin:/usr/bin:$PATH
+          python tools/package.py \
+            --qemu-source "$(cygpath -m "$GITHUB_WORKSPACE")" \
+            --exe build/qemu-system-mipsel.exe \
+            --msys-root "$(cygpath -m /)" \
+            --output "$(cygpath -m "$RUNNER_TEMP")/dist-book2"
+          # GTK needs a compiled schema cache; make sure it exists even if the
+          # MSYS2 package only shipped the XML sources.
+          glib-compile-schemas "$(cygpath -u "$RUNNER_TEMP")/dist-book2/share/glib-2.0/schemas"
+          cp "$(cygpath -u "$GITHUB_WORKSPACE")/README.md" "$(cygpath -u "$RUNNER_TEMP")/dist-book2/README.md"
+      - name: Archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "${{ runner.temp }}/dist-book2" `
+            -DestinationPath "${{ runner.temp }}/book2-qemu-windows-x86_64.zip" `
+            -CompressionLevel Optimal
       - uses: actions/upload-artifact@v4
         with:
           name: book2-qemu-windows-x86_64
-          path: book2-qemu-windows-x86_64.zip
+          path: ${{ runner.temp }}/book2-qemu-windows-x86_64.zip
+          if-no-files-found: error
 
   release:
     name: Publish Release

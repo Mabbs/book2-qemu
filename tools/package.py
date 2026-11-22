@@ -149,7 +149,8 @@ def main() -> int:
         for name in ("start.ps1", "start.cmd"):
             copy_file(PROJECT / name, Path(name))
         documentation = PROJECT / "analysis/packaging/README.md"
-        copy_file(documentation, Path("PACKAGING.md"))
+        if documentation.is_file():
+            copy_file(documentation, Path("PACKAGING.md"))
         manifest = {
             "schema": 1, "qemu_sha256": initial_exe_hash,
             "files": [{"path": p.relative_to(output).as_posix(), "sha256": digest(p),
