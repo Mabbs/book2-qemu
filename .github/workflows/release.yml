@@ -26,14 +26,22 @@ jobs:
             libspice-server-dev libvte-2.91-dev \
             libgtk-3-dev libsdl2-dev
       - name: Configure
-        run: ./configure --target-list=mipsel-softmmu --disable-werror --static
+        run: ./configure --target-list=mipsel-softmmu --disable-werror
       - name: Build
         run: ninja -C build qemu-system-mipsel
       - name: Package
         run: |
-          mkdir -p dist-book2
-          cp build/qemu-system-mipsel dist-book2/
-          cp README.md start.cmd start.ps1 build.ps1 dist-book2/ 2>/dev/null || true
+          set -e
+          mkdir -p dist-book2/bin dist-book2/share
+          cp build/qemu-system-mipsel dist-book2/bin/
+          cp README.md dist-book2/ 2>/dev/null || true
+          # Bundle every non-system shared library the binary needs.
+          mkdir -p dist-book2/lib
+          for lib in $(ldd dist-book2/bin/qemu-system-mipsel | awk '{print $3}' | grep -E '^/' | grep -vE '^/(lib|lib64|usr/lib)/' | sort -u); do
+            cp -L "$lib" dist-book2/lib/ || true
+          done
+          printf '%s\n' '#!/bin/sh' 'HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)' 'export LD_LIBRARY_PATH="$HERE/lib:${LD_LIBRARY_PATH:-}"' 'export GSETTINGS_SCHEMA_DIR="$HERE/share/glib-2.0/schemas"' 'exec "$HERE/bin/qemu-system-mipsel" "$@"' > dist-book2/run.sh
+          chmod +x dist-book2/run.sh
           tar -czf book2-qemu-linux-x86_64.tar.gz dist-book2
       - uses: actions/upload-artifact@v4
         with:
@@ -53,14 +61,21 @@ jobs:
       - name: Configure
         run: |
           export PATH="$(brew --prefix python@3.12)/bin:$PATH"
-          ./configure --target-list=mipsel-softmmu --disable-werror --static
+          ./configure --target-list=mipsel-softmmu --disable-werror
       - name: Build
         run: ninja -C build qemu-system-mipsel
       - name: Package
         run: |
-          mkdir -p dist-book2
-          cp build/qemu-system-mipsel dist-book2/
+          set -e
+          mkdir -p dist-book2/bin dist-book2/lib
+          cp build/qemu-system-mipsel dist-book2/bin/
           cp README.md dist-book2/ 2>/dev/null || true
+          # Bundle Homebrew dylibs so the binary runs without brew installed.
+          for lib in $(otool -L dist-book2/bin/qemu-system-mipsel | awk 'NR>1 {print $1}' | grep '^/opt/homebrew/' | sort -u); do
+            cp -L "$lib" dist-book2/lib/ || true
+          done
+          printf '%s\n' '#!/bin/sh' 'HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)' 'export DYLD_LIBRARY_PATH="$HERE/lib:${DYLD_LIBRARY_PATH:-}"' 'exec "$HERE/bin/qemu-system-mipsel" "$@"' > dist-book2/run.sh
+          chmod +x dist-book2/run.sh
           tar -czf book2-qemu-macos-arm64.tar.gz dist-book2
       - uses: actions/upload-artifact@v4
         with:
@@ -102,14 +117,23 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE"
           export PATH=/ucrt64/bin:/usr/bin:$PATH
-          ./configure --target-list=mipsel-softmmu --disable-werror --static
+          ./configure --target-list=mipsel-softmmu --disable-werror
           ninja -C build qemu-system-mipsel.exe
       - name: Package
         shell: bash
         run: |
-          mkdir -p dist-book2
-          cp build/qemu-system-mipsel.exe dist-book2/
-          cp README.md start.cmd start.ps1 build.ps1 dist-book2/ || true
+          set -e
+          mkdir -p dist-book2/bin dist-book2/share
+          cp build/qemu-system-mipsel.exe dist-book2/bin/
+          cp README.md start.cmd start.ps1 dist-book2/ || true
+          # Copy all UCRT64 runtime DLLs and GTK data next to the executable.
+          cp /c/msys64/ucrt64/bin/*.dll dist-book2/bin/ || true
+          for d in share/glib-2.0/schemas share/gtk-3.0 share/icons share/mime etc/gtk-3.0 lib/gdk-pixbuf-2.0 lib/gio/modules; do
+            if [ -d "/c/msys64/ucrt64/$d" ]; then
+              mkdir -p "dist-book2/$d"
+              cp -r "/c/msys64/ucrt64/$d/." "dist-book2/$d/"
+            fi
+          done
           7z a -tzip book2-qemu-windows-x86_64.zip dist-book2
       - uses: actions/upload-artifact@v4
         with:
