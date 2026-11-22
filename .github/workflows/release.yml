@@ -52,7 +52,7 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential ninja-build python3 python3-venv python3-pip pkg-config patchelf \
+            build-essential ninja-build python3 python3-venv python3-pip python3-tomli pkg-config patchelf \
             libglib2.0-dev libglib2.0-bin libpixman-1-dev zlib1g-dev \
             libgtk-3-dev libgdk-pixbuf-2.0-dev libpng-dev libjpeg-dev \
             libasound2-dev libpulse-dev libxkbcommon-dev \
