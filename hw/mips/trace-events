@@ -1,3 +1,14 @@
 # malta.c
 malta_fpga_leds(const char *text) "LEDs %s"
 malta_fpga_display(const char *text) "ASCII '%s'"
+
+# book2.c / Book2 device models
+book2_msc_cmd(uint32_t cmd, uint32_t arg, uint32_t cmdat, uint32_t nob, uint32_t pc) "MSC CMD%u arg=0x%08x cmdat=0x%08x nob=%u pc=0x%08x"
+book2_msc_ireg(uint32_t ireg) "MSC IREG -> 0x%04x"
+book2_msc_res(uint32_t val, int pos, int len) "MSC RES -> 0x%04x (pos %d/%d)"
+book2_msc_stat(uint32_t val) "MSC STAT -> 0x%08x"
+book2_msc_strpcl(uint32_t val) "MSC STRPCL <- 0x%04x"
+book2_tcu_tick(int timer, uint64_t tfr, uint32_t tmr) "TCU tick timer=%d tfr=0x%llx tmr=0x%08x"
+book2_tcu_mux(uint32_t addr, uint32_t value) "TCU mux +0x%03x value=0x%08x"
+book2_dmac_xfer(int ch, uint32_t src, uint32_t dst, uint32_t n) "DMAC ch%u 0x%08x -> 0x%08x (%u)"
+book2_dmac_cmd(uint32_t addr, uint32_t val) "DMAC <- +0x%02x 0x%08x"

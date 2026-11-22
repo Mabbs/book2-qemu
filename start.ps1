@@ -25,7 +25,9 @@ function Resolve-Image([string]$Value) {
     return $full
 }
 if (!$Qemu) {
-    foreach ($candidate in @((Join-Path $project 'bin\qemu-system-mipsel.exe'), (Join-Path $project 'dist\bin\qemu-system-mipsel.exe'), 'C:\msys64\home\Mayx\book2\qemu-11.1.3\build\qemu-system-mipsel.exe')) {
+    # build.ps1 writes the executable to <repo>\build\qemu-system-mipsel.exe.
+    # Keep the packaged locations as fallbacks for users who ran package.py.
+    foreach ($candidate in @((Join-Path $project 'build\qemu-system-mipsel.exe'), (Join-Path $project 'bin\qemu-system-mipsel.exe'), (Join-Path $project 'dist\bin\qemu-system-mipsel.exe'))) {
         if (Test-Path -LiteralPath $candidate -PathType Leaf) { $Qemu = $candidate; break }
     }
     if (!$Qemu) { throw 'No QEMU executable found; supply -Qemu <path> or build/package the emulator first.' }
