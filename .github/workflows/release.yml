@@ -26,7 +26,7 @@ jobs:
             libspice-server-dev libvte-2.91-dev \
             libgtk-3-dev libsdl2-dev
       - name: Configure
-        run: ./configure --target-list=mipsel-softmmu --disable-werror
+        run: ./configure --target-list=mipsel-softmmu --disable-werror --static
       - name: Build
         run: ninja -C build qemu-system-mipsel
       - name: Package
@@ -53,7 +53,7 @@ jobs:
       - name: Configure
         run: |
           export PATH="$(brew --prefix python@3.12)/bin:$PATH"
-          ./configure --target-list=mipsel-softmmu --disable-werror
+          ./configure --target-list=mipsel-softmmu --disable-werror --static
       - name: Build
         run: ninja -C build qemu-system-mipsel
       - name: Package
@@ -102,7 +102,7 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE"
           export PATH=/ucrt64/bin:/usr/bin:$PATH
-          ./configure --target-list=mipsel-softmmu --disable-werror
+          ./configure --target-list=mipsel-softmmu --disable-werror --static
           ninja -C build qemu-system-mipsel.exe
       - name: Package
         shell: bash
