@@ -1,0 +1,133 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Build (Linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build python3 python3-pip \
+            pkg-config libglib2.0-dev libpixman-1-dev zlib1g-dev \
+            libslirp-dev libseccomp-dev libcap-ng-dev libcurl4-openssl-dev \
+            libzstd-dev libgcrypt20-dev libgnutls28-dev \
+            libspice-server-dev libvte-2.91-dev \
+            libgtk-3-dev libsdl2-dev
+      - name: Configure
+        run: ./configure --target-list=mipsel-softmmu --disable-werror
+      - name: Build
+        run: ninja -C build qemu-system-mipsel
+      - name: Package
+        run: |
+          mkdir -p dist-book2
+          cp build/qemu-system-mipsel dist-book2/
+          cp README.md start.cmd start.ps1 build.ps1 dist-book2/ 2>/dev/null || true
+          tar -czf book2-qemu-linux-x86_64.tar.gz dist-book2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: book2-qemu-linux-x86_64
+          path: book2-qemu-linux-x86_64.tar.gz
+
+  macos:
+    name: Build (macOS arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          brew update
+          brew install ninja pkg-config glib pixman python@3.12 \
+            slirp libssh curl zstd gnutls gcrypt jpeg-turbo sdl2 gtk+3
+      - name: Configure
+        run: |
+          export PATH="$(brew --prefix python@3.12)/bin:$PATH"
+          ./configure --target-list=mipsel-softmmu --disable-werror
+      - name: Build
+        run: ninja -C build qemu-system-mipsel
+      - name: Package
+        run: |
+          mkdir -p dist-book2
+          cp build/qemu-system-mipsel dist-book2/
+          cp README.md dist-book2/ 2>/dev/null || true
+          tar -czf book2-qemu-macos-arm64.tar.gz dist-book2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: book2-qemu-macos-arm64
+          path: book2-qemu-macos-arm64.tar.gz
+
+  windows:
+    name: Build (Windows x86_64, MSYS2 UCRT64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MSYS2 UCRT64 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-glib2
+            mingw-w64-ucrt-x86_64-pixman
+            mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-libslirp
+            mingw-w64-ucrt-x86_64-gnutls
+            mingw-w64-ucrt-x86_64-libgcrypt
+            mingw-w64-ucrt-x86_64-curl
+            mingw-w64-ucrt-x86_64-zstd
+            mingw-w64-ucrt-x86_64-gtk3
+            mingw-w64-ucrt-x86_64-sdl2
+            git
+      - name: Configure and build
+        shell: msys2 {0}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          export PATH=/ucrt64/bin:/usr/bin:$PATH
+          ./configure --target-list=mipsel-softmmu --disable-werror --enable-sdl --enable-gtk
+          ninja -C build qemu-system-mipsel.exe
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist-book2
+          cp build/qemu-system-mipsel.exe dist-book2/
+          cp README.md start.cmd start.ps1 build.ps1 dist-book2/ || true
+          7z a -tzip book2-qemu-windows-x86_64.zip dist-book2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: book2-qemu-windows-x86_64
+          path: book2-qemu-windows-x86_64.zip
+
+  release:
+    name: Publish Release
+    needs: [linux, macos, windows]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
