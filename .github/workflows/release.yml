@@ -42,7 +42,7 @@ jobs:
 
   macos:
     name: Build (macOS arm64)
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
@@ -95,13 +95,14 @@ jobs:
             mingw-w64-ucrt-x86_64-zstd
             mingw-w64-ucrt-x86_64-gtk3
             mingw-w64-ucrt-x86_64-sdl2
+            diffutils
             git
       - name: Configure and build
         shell: msys2 {0}
         run: |
           cd "$GITHUB_WORKSPACE"
           export PATH=/ucrt64/bin:/usr/bin:$PATH
-          ./configure --target-list=mipsel-softmmu --disable-werror --enable-sdl --enable-gtk
+          ./configure --target-list=mipsel-softmmu --disable-werror
           ninja -C build qemu-system-mipsel.exe
       - name: Package
         shell: bash
