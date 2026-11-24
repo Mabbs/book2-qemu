@@ -18,10 +18,16 @@ if (!(Test-Path -LiteralPath $bash -PathType Leaf)) { throw "MSYS2 bash not foun
 if (!(Test-Path -LiteralPath $ninja -PathType Leaf)) { throw "ninja not found: $ninja" }
 
 # MSYS2 path for the repository and build directory (drive C: -> /c).
-$repoPosix = '/' + ($project -replace '\\','/') -replace '^([A-Za-z]):','$1'
-$repoPosix = $repoPosix -replace '^/([A-Za-z])/', { '/$1/'.ToLower() }
-$buildPosix = '/' + ($BuildDirectory -replace '\\','/') -replace '^([A-Za-z]):','$1'
-$buildPosix = $buildPosix -replace '^/([A-Za-z])/', { '/$1/'.ToLower() }
+# Windows PowerShell 5.1 stringifies a script block passed to -replace, so the
+# drive letter has to be lowercased explicitly.
+function ConvertTo-MsysPath([string]$Path) {
+    if ($Path -match '^([A-Za-z]):(.*)$') {
+        return '/' + $Matches[1].ToLower() + ($Matches[2] -replace '\\','/')
+    }
+    return $Path -replace '\\','/'
+}
+$repoPosix = ConvertTo-MsysPath $project
+$buildPosix = ConvertTo-MsysPath $BuildDirectory
 $tmpPosix = Join-Path $project '.tmp'
 New-Item -ItemType Directory -Path $tmpPosix -Force | Out-Null
 $tmpP = $tmpPosix -replace '\\','/'

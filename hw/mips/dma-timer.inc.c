@@ -17,6 +17,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(Book2DmacState, BOOK2_DMAC)
 #define BOOK2_DMA_SAI (1u << 23)
 #define BOOK2_DMA_DAI (1u << 22)
 #define BOOK2_DMA_TIE (1u << 1)
+#define BOOK2_DMA_FLAGS (BOOK2_DMA_TT | BOOK2_DMA_AR | BOOK2_DMA_HLT)
 
 struct Book2DmacState {
     SysBusDevice parent_obj;
@@ -24,9 +25,14 @@ struct Book2DmacState {
     qemu_irq irq[BOOK2_DMA_BANKS];
     QEMUTimer *service;
     uint32_t regs[BOOK2_DMA_WINDOW / 4];
+    /* Terminated channels whose interrupt the guest has not collected yet. */
+    uint32_t pending[BOOK2_DMA_BANKS];
+    bool in_service;
     DeviceState *aic;
     bool (*aic_ready)(DeviceState *, unsigned writes);
 };
+
+static void book2_dma_service(void *opaque);
 
 static inline void book2_dmac_set_aic(DeviceState *dev, DeviceState *aic,
                                        bool (*ready)(DeviceState *, unsigned))
@@ -35,6 +41,20 @@ static inline void book2_dmac_set_aic(DeviceState *dev, DeviceState *aic,
 
     s->aic = aic;
     s->aic_ready = ready;
+    BOOK2_AIC(aic)->dmac = dev;
+}
+
+/* A peripheral raises its DMA request line; the DMAC services it at once. */
+static void book2_dma_request(DeviceState *dev)
+{
+    book2_dma_service(BOOK2_DMAC(dev));
+}
+
+static void book2_dmac_retire(Book2DmacState *s, unsigned bank,
+                              uint32_t channels)
+{
+    s->pending[bank] &= ~channels;
+    qemu_set_irq(s->irq[bank], s->pending[bank] != 0);
 }
 
 static hwaddr book2_dma_phys(uint32_t addr)
@@ -129,10 +149,15 @@ static int book2_dma_run(Book2DmacState *s, unsigned bank, unsigned ch)
         }
         for (unsigned i = 0; i < unit; i += dw) {
             hwaddr a = dst + (dai ? i : 0);
-            if (book2_dma_own_reg(a) ||
-                address_space_rw(&address_space_memory, a,
-                                 MEMTXATTRS_UNSPECIFIED, buf + i, dw,
-                                 true) != MEMTX_OK) {
+            if (req == 24) {
+                uint32_t sample = dw == 4 ? ldl_le_p(buf + i) :
+                                  dw == 2 ? lduw_le_p(buf + i) : buf[i];
+
+                book2_aic_push_sample(BOOK2_AIC(s->aic), sample);
+            } else if (book2_dma_own_reg(a) ||
+                       address_space_rw(&address_space_memory, a,
+                                        MEMTXATTRS_UNSPECIFIED, buf + i, dw,
+                                        true) != MEMTX_OK) {
                 status = BOOK2_DMA_AR;
                 goto finish;
             }
@@ -175,20 +200,15 @@ finish:
     if (status == BOOK2_DMA_AR) {
         b[0] |= BOOK2_DMA_AR >> 2; /* DMACR.AR (bit 2; see regs.h). */
     }
-    if (cmd & BOOK2_DMA_TIE) {
-        b[1] |= 1u << ch;
-    }
     /*
-     * This firmware services the audio channel by polling DCCSR.TT and the
-     * DMAIPR status word (see the driver's 0x800c4320 loop); it never writes
-     * DMAIPR to acknowledge an interrupt during playback.  Asserting the
-     * IRQ_DMAC1 line here therefore leaves a level interrupt pending that
-     * nobody clears, saturating the guest with exceptions and starving its
-     * main loop.  Keep the status bit visible for polling, but do not raise
-     * the interrupt line for this channel.
+     * DMAIPR latches terminated channels: the firmware's dispatcher reads it
+     * once per bank interrupt and nothing in the firmware ever writes it, so
+     * the completion handler may leave TT and TIE set when the queue is
+     * already empty without the line staying asserted.
      */
-    if (bank == 0) {
-        qemu_set_irq(s->irq[0], b[1] != 0);
+    if (cmd & BOOK2_DMA_TIE) {
+        s->pending[bank] |= 1u << ch;
+        qemu_set_irq(s->irq[bank], true);
     }
     return 0;
 }
@@ -198,6 +218,11 @@ static void book2_dma_service(void *opaque)
     Book2DmacState *s = opaque;
     int delay = 0;
 
+    /* A request raised while a channel is being served is covered by it. */
+    if (s->in_service) {
+        return;
+    }
+    s->in_service = true;
     for (unsigned bank = 0; bank < BOOK2_DMA_BANKS; bank++) {
         for (unsigned ch = 0; ch < BOOK2_DMA_CHANNELS; ch++) {
             int next = book2_dma_run(s, bank, ch);
@@ -206,6 +231,7 @@ static void book2_dma_service(void *opaque)
             }
         }
     }
+    s->in_service = false;
     if (delay) {
         timer_mod(s->service, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + delay);
     } else {
@@ -216,6 +242,17 @@ static void book2_dma_service(void *opaque)
 static uint64_t book2_dmac_read(void *opaque, hwaddr addr, unsigned size)
 {
     Book2DmacState *s = opaque;
+
+    if ((addr >> 8) == 3 || (addr >> 8) == 4) {
+        unsigned bank = (addr >> 8) - 3;
+
+        if ((addr & 0xff) == 0x04) {
+            uint32_t pending = s->pending[bank];
+
+            book2_dmac_retire(s, bank, UINT32_MAX);
+            return pending;
+        }
+    }
     return s->regs[addr / 4];
 }
 
@@ -229,23 +266,19 @@ static void book2_dmac_write(void *opaque, hwaddr addr, uint64_t val,
     uint32_t old = *r;
 
     if (bank < BOOK2_DMA_BANKS && off < 0xc0) {
+        unsigned ch = off / 0x20;
+        uint32_t *c = &s->regs[(bank * 0x100 + ch * 0x20) / 4];
+        bool start = false;
+
         if ((off & 0x1f) == 0x08) {
             *r = val & 0xffffff;
         } else if ((off & 0x1f) == 0x10) {
-            uint32_t *b = &s->regs[(0x300 + bank * 0x100) / 4];
-            uint32_t flags = BOOK2_DMA_HLT | BOOK2_DMA_AR |
-                             BOOK2_DMA_TT | BOOK2_DMA_INV;
-            unsigned ch = off / 0x20;
+            uint32_t flags = BOOK2_DMA_FLAGS | BOOK2_DMA_INV;
 
             trace_book2_dmac_cmd(addr, val);
             *r = (val & ~flags) | (old & val & flags);
-            if ((old & flags) && !(*r & flags)) {
-                b[1] &= ~(1u << ch);
-                qemu_set_irq(s->irq[bank], b[1] != 0);
-            }
-            if ((val & BOOK2_DMA_EN) && !(old & BOOK2_DMA_EN)) {
-                uint32_t *c = r - 4;
-                static const unsigned units[] = { 4, 1, 2, 16, 32, 0, 0, 0 };
+            start = (val & BOOK2_DMA_EN) && !(old & BOOK2_DMA_EN);
+            if (start) {
                 /*
                  * Re-arming the channel for a new transfer must retire the
                  * completion/error state of the previous one.  book2_dma_run()
@@ -254,14 +287,21 @@ static void book2_dmac_write(void *opaque, hwaddr addr, uint64_t val,
                  * for every buffer) would never see progress and would poll
                  * forever, starving the rest of the system.
                  */
-                *r &= ~(BOOK2_DMA_TT | BOOK2_DMA_AR | BOOK2_DMA_HLT);
-                trace_book2_dmac_xfer(bank * BOOK2_DMA_CHANNELS + ch,
-                                     c[0], c[1],
-                                     c[2] * units[(c[5] >> 8) & 7]);
-                book2_dma_service(s);
+                *r &= ~BOOK2_DMA_FLAGS;
             }
         } else {
             *r = val;
+        }
+        /* Clearing a channel's flags or its interrupt enable acknowledges. */
+        if (!(c[5] & BOOK2_DMA_TIE) || !(c[4] & BOOK2_DMA_FLAGS)) {
+            book2_dmac_retire(s, bank, 1u << ch);
+        }
+        if (start) {
+            static const unsigned units[] = { 4, 1, 2, 16, 32, 0, 0, 0 };
+
+            trace_book2_dmac_xfer(bank * BOOK2_DMA_CHANNELS + ch, c[0], c[1],
+                                  c[2] * units[(c[5] >> 8) & 7]);
+            book2_dma_service(s);
         }
         return;
     }
@@ -276,24 +316,7 @@ static void book2_dmac_write(void *opaque, hwaddr addr, uint64_t val,
             book2_dma_service(s);
             break;
         case 0x04: /* DMAIPR: the handler clears pending bits with RMW. */
-            *r &= val;
-            /*
-             * The global DMAIPR window at 0x300/0x400 is shared by both DMA
-             * banks, but their interrupt outputs are distinct: bank 0 ->
-             * irq[0] (IRQ_DMAC0=20), bank 1 -> irq[1] (IRQ_DMAC1=15).
-             * Clearing pending bits here must re-evaluate BOTH lines.
-             * Previously only irq[bank-3] was lowered: for the audio channel
-             * (bank 1) the firmware writes DMAIPR at 0x13020304 (bank=3
-             * window), so the model lowered irq[0]=IRQ20 and left IRQ15
-             * asserted forever.  The resulting interrupt storm starved the
-             * main loop, which looked like the UI freezing while playing.
-             */
-            {
-                uint32_t p0 = s->regs[(0x300) / 4];
-                uint32_t p1 = s->regs[(0x400) / 4];
-                qemu_set_irq(s->irq[0], p0 != 0);
-                /* bank 1 (audio) is polled; its line must stay low. */
-            }
+            book2_dmac_retire(s, bank - 3, ~val & 0x3f);
             break;
         case 0x0c: /* Descriptor doorbell is outside this NDES model. */
             s->regs[(addr - 4) / 4] |= val & 0x3f;
@@ -330,6 +353,7 @@ static void book2_dmac_reset(DeviceState *dev)
 
     timer_del(s->service);
     memset(s->regs, 0, sizeof(s->regs));
+    memset(s->pending, 0, sizeof(s->pending));
     for (unsigned bank = 0; bank < BOOK2_DMA_BANKS; bank++) {
         qemu_set_irq(s->irq[bank], 0);
     }

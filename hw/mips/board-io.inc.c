@@ -12,6 +12,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(Book2GpioState, BOOK2_GPIO)
 #define BOOK2_GPIO_BANKS 6
 #define BOOK2_KEY_SENSE 11
 #define BOOK2_KEY_DRIVE 5
+#define BOOK2_MATRIX_KEYS (BOOK2_KEY_DRIVE * BOOK2_KEY_SENSE)
+#define BOOK2_DIRECT_KEYS 3
 #define BOOK2_GPIO_USB_VBUS 144
 
 /* data2.dat.bin: sense pins at 0x80102b90, drive pins at 0x80102bbc. */
@@ -19,14 +21,26 @@ static const uint8_t book2_key_sense[BOOK2_KEY_SENSE] = {
     131, 130, 134, 137, 132, 136, 133, 152, 153, 183, 181,
 };
 static const uint8_t book2_key_drive[BOOK2_KEY_DRIVE] = {128, 129, 138, 84, 139};
+/*
+ * Three keys bypass the matrix and pull their pin high while held: the
+ * firmware waits on these pins for key codes 0x2a/0x61/0x70 (0x80046994)
+ * and configures them for rising-edge interrupts with the pull disabled.
+ * They idle low, unlike the matrix sense lines.
+ */
+static const uint8_t book2_direct_pin[BOOK2_DIRECT_KEYS] = {
+    5 * 32 + 22, /* PF22: case modifier, read by 0x80046534 */
+    4 * 32 + 7,  /* PE7, read by 0x800464bc */
+    4 * 32 + 19, /* PE19 */
+};
 /* The firmware translates a closure to index (4-drive)*11 + 10-sense.
  * Entries use Linux/AT key numbers, as supplied by QEMU's input API. */
-static const uint8_t book2_key_code[BOOK2_KEY_DRIVE * BOOK2_KEY_SENSE] = {
+static const uint8_t book2_key_code[BOOK2_MATRIX_KEYS + BOOK2_DIRECT_KEYS] = {
     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
     0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a,
     0x3a, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
     0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x32, 0x33, 0x68, 0x67, 0x6d, 0x1b,
     0x2b, 0x35, 0x28, 0x39, 0x31, 0x77, 0x69, 0x6c, 0x6a, 0x1c, 0x6f,
+    0x2a, 0x61, 0x70,
 };
 
 struct Book2GpioState {
@@ -38,8 +52,8 @@ struct Book2GpioState {
     struct {
         uint32_t pins, data, mask, pull, func, sel, dir, trig, flag;
     } g[BOOK2_GPIO_BANKS];
-    bool pressed[BOOK2_KEY_DRIVE * BOOK2_KEY_SENSE];
-    int64_t release_at[BOOK2_KEY_DRIVE * BOOK2_KEY_SENSE];
+    bool pressed[BOOK2_MATRIX_KEYS + BOOK2_DIRECT_KEYS];
+    int64_t release_at[BOOK2_MATRIX_KEYS + BOOK2_DIRECT_KEYS];
     uint32_t external_low[BOOK2_GPIO_BANKS];
 };
 
@@ -72,6 +86,13 @@ static void book2_gpio_update(Book2GpioState *s)
             if (s->pressed[index]) {
                 low[pin / 32] |= 1u << (pin % 32);
             }
+        }
+    }
+    for (unsigned i = 0; i < BOOK2_DIRECT_KEYS; i++) {
+        if (s->pressed[BOOK2_MATRIX_KEYS + i]) {
+            unsigned pin = book2_direct_pin[i];
+
+            low[pin / 32] &= ~(1u << (pin % 32));
         }
     }
     for (unsigned bank = 0; bank < BOOK2_GPIO_BANKS; bank++) {
@@ -277,6 +298,15 @@ static void book2_gpio_realize(DeviceState *dev, Error **errp)
     /* PE16 is USB VBUS detect. Default to no external host attached. */
     s->external_low[BOOK2_GPIO_USB_VBUS / 32] |=
         1u << (BOOK2_GPIO_USB_VBUS % 32);
+    /*
+     * The direct keys short their pin to VCC; the board otherwise pulls it
+     * low.
+     */
+    for (unsigned i = 0; i < BOOK2_DIRECT_KEYS; i++) {
+        unsigned pin = book2_direct_pin[i];
+
+        s->external_low[pin / 32] |= 1u << (pin % 32);
+    }
     s->keyboard = qemu_input_handler_register(dev, &book2_gpio_keys);
     s->key_release = timer_new_ns(QEMU_CLOCK_VIRTUAL, book2_gpio_key_release, s);
     book2_gpio_reset(dev);
