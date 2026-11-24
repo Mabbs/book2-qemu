@@ -48,7 +48,10 @@ struct Book2AicState {
     int64_t last_ns;
     unsigned rate;
     bool advancing;
+    DeviceState *dmac;
 };
+
+static void book2_dma_request(DeviceState *dev);
 
 static unsigned book2_aic_sample_bits(Book2AicState *s)
 {
@@ -186,13 +189,28 @@ static void book2_aic_advance(Book2AicState *s)
     /* Bound backend work after very large virtual-time jumps. The FIFO is
      * nevertheless fully drained, and underrun is recorded. */
     frames = MIN(frames, B2A_PCM_SIZE / 4);
-    for (uint64_t i = 0; i < frames; i++) {
-        int16_t l = book2_aic_pop_sample(s, 0);
-        int16_t r = mono ? l : book2_aic_pop_sample(s, 1);
-        if (book2_aic_codec_muted(s)) {
-            l = r = 0;
+    {
+        unsigned threshold = (B2A_R(s, B2A_FR) >> 8) & 15;
+
+        for (uint64_t i = 0; i < frames; i++) {
+            int16_t l = book2_aic_pop_sample(s, 0);
+            int16_t r = mono ? l : book2_aic_pop_sample(s, 1);
+            if (book2_aic_codec_muted(s)) {
+                l = r = 0;
+            }
+            book2_aic_queue_frame(s, l, r);
+            /*
+             * Falling to the threshold asserts the AIC's DMA request and the
+             * DMAC refills the FIFO at once.  Waiting for the periodic service
+             * timer instead leaves TFS readable through most of the playback,
+             * and the firmware driver takes TFS as leave to reprogram a
+             * running channel with the next buffer, which aborts the
+             * transfer in progress.
+             */
+            if (s->dmac && s->fifo_count <= threshold) {
+                book2_dma_request(s->dmac);
+            }
         }
-        book2_aic_queue_frame(s, l, r);
     }
     book2_aic_update_irq(s);
     s->advancing = false;
@@ -244,6 +262,20 @@ static bool book2_aic_dma_ready(DeviceState *dev, unsigned writes)
     threshold = (B2A_R(s, B2A_FR) >> 8) & 15;
     return (B2A_R(s, B2A_FR) & 1) && (B2A_R(s, B2A_CR) & B2A_TDMS) &&
            s->fifo_count <= threshold && writes <= B2A_FIFO - s->fifo_count;
+}
+
+/*
+ * Sample store for the DMAC.  It deliberately bypasses MMIO dispatch: the
+ * DMA request that brings it about can be raised from inside an AIC register
+ * access, and a nested access to the same device is dropped by QEMU's
+ * re-entrancy guard (which the DMAC would then take for a bus error).
+ */
+static void book2_aic_push_sample(Book2AicState *s, uint32_t value)
+{
+    if (s->fifo_count < B2A_FIFO) {
+        s->fifo[(s->fifo_head + s->fifo_count) % B2A_FIFO] = value;
+        s->fifo_count++;
+    }
 }
 
 static uint64_t book2_aic_read(void *opaque, hwaddr addr, unsigned size)
@@ -301,10 +333,7 @@ static void book2_aic_write(void *opaque, hwaddr addr, uint64_t value, unsigned 
     val = (old & ~mask) | (((uint32_t)value << shift) & mask);
     switch (off) {
     case B2A_DR:
-        if (s->fifo_count < B2A_FIFO) {
-            s->fifo[(s->fifo_head + s->fifo_count) % B2A_FIFO] = (uint32_t)value;
-            s->fifo_count++;
-        }
+        book2_aic_push_sample(s, (uint32_t)value);
         break;
     case B2A_SR:
         /* Error flags are W0C. FIFO counts/service flags are hardware-owned. */
